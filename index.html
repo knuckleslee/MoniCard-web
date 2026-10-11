@@ -170,6 +170,10 @@
 /* ---- Protocol constants (see README) ---- */
 const SERVICE  = "7369666c-695f-7364-0000-000000000000";
 const DATA_CHR = "7369666c-695f-7364-0002-000000000000";
+// The vendor app also accepts the byte-reversed form of each UUID (some firmware/OS
+// combinations expose it that way), so we authorise and try both.
+const SERVICE_REV = "00000000-0000-0000-6473-5f696c666973";
+const DATA_CHR_REV = "00000000-0000-0200-6473-5f696c666973";
 const CATE = { OTA: 1, FILE: 4, CONTROL: 31 };
 const CMD = {
   SET_CARD_INFO: 14, RESP_CARD_INFO: 15, READ_CARD_INFO: 16, RESP_READ_CARD: 17,
@@ -309,7 +313,7 @@ function mustOk(msg, what) { const s = status(msg); if (s !== 0) throw new Error
 async function connect() {
   if (!navigator.bluetooth) return;
   const mode = $("scanMode").value;
-  const opts = { optionalServices: [SERVICE] };
+  const opts = { optionalServices: [SERVICE, SERVICE_REV] };
   if (mode === "name") opts.filters = [{ namePrefix: "MoniCard" }, { namePrefix: "monicard" }];
   else if (mode === "mfr") opts.filters = [{ manufacturerData: [{ companyIdentifier: 0x8a3d }] }];
   else opts.acceptAllDevices = true;
@@ -328,18 +332,22 @@ async function connect() {
       log("inf", `GATT 連線中（第 ${attempt} 次）…`);
       const server = await device.gatt.connect();
       await sleep(400); // some stacks need a moment before service discovery
-      let svc;
-      try { svc = await server.getPrimaryService(SERVICE); }
-      catch (e) {
+      let svc = null, chrUuid = DATA_CHR;
+      for (const [sUuid, cUuid] of [[SERVICE, DATA_CHR], [SERVICE_REV, DATA_CHR_REV]]) {
+        try { svc = await server.getPrimaryService(sUuid); chrUuid = cUuid; log("inf", "使用服務 " + sUuid); break; }
+        catch (_) { /* try next form */ }
+      }
+      if (!svc) {
         const all = await server.getPrimaryServices().catch(() => []);
-        log("err", "找不到 MoniCard 服務（若為空表示瀏覽器未授權讀取）。裝置的服務：" +
-          (all.map((s) => s.uuid).join(", ") || "（無）"));
-        throw e;
+        log("err", "找不到 MoniCard 服務（兩種 UUID 寫法都不存在）。可讀到的服務：" +
+          (all.map((s) => s.uuid).join(", ") || "（無）") +
+          " 。若選到的不是卡片本體，請改選名稱含 MoniCard 的裝置。");
+        throw new Error("No MoniCard service");
       }
       const chars = await svc.getCharacteristics().catch(() => []);
       chars.forEach((c) => log("inf", `特徵 ${c.uuid} 屬性：` +
         Object.keys(c.properties).filter((k) => c.properties[k]).join(",")));
-      chr = await svc.getCharacteristic(DATA_CHR);
+      chr = await svc.getCharacteristic(chrUuid);
       chr.addEventListener("characteristicvaluechanged", onNotify);
       await chr.startNotifications();
       ready = true;
