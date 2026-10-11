@@ -161,7 +161,8 @@
   <section class="card">
     <h2>日誌</h2>
     <div id="log"></div>
-    <div class="row" style="margin-top:8px"><button id="btnClear">清除</button></div>
+    <div class="row" style="margin-top:8px"><button id="btnCopy" class="primary">複製日誌</button>
+      <button id="btnClear">清除</button></div>
   </section>
 </main>
 
@@ -505,6 +506,26 @@ $("btnCarWrite").onclick = () => guard(writeCarousel);
 $("btnCards").onclick = () => guard(readCards);
 $("btnRaw").onclick = () => guard(sendRaw);
 $("btnClear").onclick = () => ($("log").textContent = "");
+$("btnCopy").onclick = async () => {
+  const text = Array.from($("log").children, (n) => n.textContent).join("
+");
+  if (!text) { log("inf", "日誌是空的"); return; }
+  const btn = $("btnCopy"), label = btn.textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    // Fallback for contexts without the async clipboard API
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) {}
+    ta.remove();
+    if (!ok) { btn.textContent = "複製失敗，請長按日誌手動選取"; setTimeout(() => (btn.textContent = label), 2500); return; }
+  }
+  btn.textContent = "已複製 ✓";
+  setTimeout(() => (btn.textContent = label), 1500);
+};
 $("cardText").addEventListener("input", updateCardBytes);
 </script>
 </body>
