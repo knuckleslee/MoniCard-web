@@ -44,6 +44,7 @@
   .ctrls{flex:1;min-width:220px}
   .ctrls input[type=range]{width:100%}
   progress{accent-color:var(--accent)}
+  #mOut{white-space:pre-line}
   .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   @media(max-width:560px){.two{grid-template-columns:1fr}}
 </style>
@@ -149,6 +150,7 @@
     <div class="row">
       <label><input type="radio" name="mediaMode" value="image" checked> 圖片（轉為 240×320 PNG）</label>
       <label><input type="radio" name="mediaMode" value="anim"> 動畫（GIF／影片，最長 10 秒，轉為 MJPEG MP4）</label>
+      <label><input type="radio" name="mediaMode" value="raw"> 原檔直傳（240×320 PNG 或 MJPEG MP4，不轉換）</label>
     </div>
     <div class="row" style="margin-top:10px"><input type="file" id="mediaFile" accept="image/*"></div>
     <div class="editor">
@@ -176,7 +178,7 @@
     <progress id="mProg" max="100" value="0" style="width:100%;margin-top:10px"></progress>
     <div class="hint" id="mMsg">選擇檔案後，拖曳畫面調整構圖，再按「轉換」。</div>
     <div class="hint" id="mOut"></div>
-    <p class="hint">傳輸需數十秒到數分鐘，請保持畫面開啟並靠近卡片。預設單次寫入 512 bytes；若傳輸失敗或逾時，可把上方「單次寫入大小」改小（244 或 20）再試。</p>
+    <p class="hint">傳輸需數十秒到數分鐘，請保持畫面開啟並靠近卡片。預設單次寫入 512 bytes；寫入失敗或裝置無回應時，會自動降級（512 → 244 → 20）並重試。</p>
   </section>
 
   <section class="card">
@@ -481,14 +483,32 @@ function onNotify(ev) {
 }
 
 // All writes go through one lock so a whole message is never interleaved with another.
+const CHUNK_TIERS = [512, 244, 20];
+// Lower the write size one tier (512 -> 244 -> 20). Returns false when already at the minimum.
+function downgradeChunk(reason) {
+  const cur = Number($("chunk").value);
+  const next = CHUNK_TIERS.find((v) => v < cur);
+  if (!next) return false;
+  $("chunk").value = String(next);
+  log("inf", `單次寫入大小 ${cur} → ${next}（${reason}）`);
+  return true;
+}
+async function writeParts(buf, size) {
+  const noResp = chr.properties.writeWithoutResponse;
+  for (const part of splitFrame(buf, size)) {
+    if (!quiet) log("tx", "TX " + hex(part));
+    if (noResp) await chr.writeValueWithoutResponse(part);
+    else await chr.writeValueWithResponse(part);
+  }
+}
 function writeAll(buf) {
   const run = async () => {
-    const size = Number($("chunk").value);
-    const noResp = chr.properties.writeWithoutResponse;
-    for (const part of splitFrame(buf, size)) {
-      if (!quiet) log("tx", "TX " + hex(part));
-      if (noResp) await chr.writeValueWithoutResponse(part);
-      else await chr.writeValueWithResponse(part);
+    for (;;) {
+      try { await writeParts(buf, Number($("chunk").value)); return; }
+      catch (e) {
+        // Same recovery as the vendor app: resend the whole message with a smaller size.
+        if (!device || !device.gatt.connected || !downgradeChunk("寫入失敗：" + (e.message || e))) throw e;
+      }
     }
   };
   const p = writeLock.then(run, run);
@@ -791,6 +811,7 @@ function setScale(v) {
 async function loadMedia(file) {
   stopPreview(); closeSrc(); invalidate();
   if (!file) return;
+  if (edMode() === "raw") { try { await loadRaw(file); } catch (e) { setMsg("讀取失敗：" + e.message, 0); } return; }
   setMsg("讀取中…", 0);
   try {
     if (edMode() === "image") {
@@ -824,6 +845,120 @@ async function loadMedia(file) {
   await showAt(0);
   const info = ED.src.kind === "image" ? "" : `，長度 ${fmtMs(ED.src.duration)}`;
   setMsg(`已載入 ${ED.src.w}×${ED.src.h}${info}。拖曳畫面調整構圖，再按「轉換」。`, 0);
+}
+
+/* ---- Raw pass-through: validate a ready-made PNG / MJPEG MP4 ---- */
+function inspectRaw(b) {
+  const lines = [];
+  const add = (ok, text) => lines.push({ ok, text });
+  const be32 = (o) => (((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0);
+  const be16 = (o) => (b[o] << 8) | b[o + 1];
+  const tag = (o) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3]);
+  const isPng = b.length > 33 && b[0] === 0x89 && tag(1) === "PNG\r" && tag(12) === "IHDR";
+  const isMp4 = b.length > 16 && tag(4) === "ftyp";
+  let kind = null;
+
+  if (isPng) {
+    kind = "png";
+    const w = be32(16), h = be32(20);
+    add(true, "格式：PNG");
+    add(w === OUT_W && h === OUT_H, `尺寸 ${w}×${h}（需要 ${OUT_W}×${OUT_H}，直向）`);
+  } else if (isMp4) {
+    kind = "mp4";
+    const walk = (start, end) => {
+      const out = []; let o = start;
+      while (o + 8 <= end) {
+        let size = be32(o), hdr = 8;
+        if (size === 1) { size = be32(o + 12); hdr = 16; } else if (size === 0) size = end - o;
+        if (size < hdr || o + size > end) break;
+        out.push({ type: tag(o + 4), start: o + hdr, end: o + size });
+        o += size;
+      }
+      return out;
+    };
+    const find = (list, t) => list.find((x) => x.type === t);
+    const top = walk(0, b.length);
+    add(true, "格式：MP4");
+    add(!!find(top, "mdat"), "包含影像資料（mdat）");
+    const moov = find(top, "moov");
+    if (!moov) add(false, "找不到 moov（檔案不完整或為串流格式）");
+    else {
+      const traks = walk(moov.start, moov.end).filter((x) => x.type === "trak");
+      let video = null, hasAudio = false;
+      for (const t of traks) {
+        const mdia = find(walk(t.start, t.end), "mdia");
+        if (!mdia) continue;
+        const m = walk(mdia.start, mdia.end);
+        const hdlr = find(m, "hdlr");
+        const handler = hdlr ? tag(hdlr.start + 8) : "";
+        if (handler === "soun") hasAudio = true;
+        if (handler !== "vide" || video) continue;
+        const mdhd = find(m, "mdhd");
+        const stbl = (() => {
+          const minf = find(m, "minf");
+          return minf ? find(walk(minf.start, minf.end), "stbl") : null;
+        })();
+        if (!stbl) continue;
+        const st = walk(stbl.start, stbl.end);
+        const stsd = find(st, "stsd"), stts = find(st, "stts");
+        const info = { codec: "", w: 0, h: 0, fps: 0, frames: 0 };
+        if (stsd && stsd.end - stsd.start >= 36) {
+          info.codec = tag(stsd.start + 12);
+          info.w = be16(stsd.start + 8 + 8 + 24); // entry header(8) + visual entry fields
+          info.h = be16(stsd.start + 8 + 8 + 26);
+        }
+        if (mdhd && stts && stts.end - stts.start >= 16) {
+          const timescale = be32(mdhd.start + 12);
+          const n = be32(stts.start + 4);
+          let frames = 0, firstDelta = 0;
+          for (let i = 0; i < n && stts.start + 8 + i * 8 + 8 <= stts.end; i++) {
+            const c = be32(stts.start + 8 + i * 8), d = be32(stts.start + 12 + i * 8);
+            if (i === 0) firstDelta = d;
+            frames += c;
+          }
+          info.frames = frames;
+          info.fps = firstDelta ? timescale / firstDelta : 0;
+        }
+        video = info;
+      }
+      if (!video) add(false, "找不到視訊軌");
+      else {
+        add(video.codec === "mjpg", `編碼：${video.codec || "未知"}（需要 mjpg；一般 H.264 影片請改用「動畫」轉換）`);
+        add(video.w === OUT_W && video.h === OUT_H, `尺寸 ${video.w}×${video.h}（需要 ${OUT_W}×${OUT_H}）`);
+        if (video.fps) {
+          const fpsOk = Math.abs(video.fps - FPS) < 0.5;
+          lines.push({ ok: true, warn: !fpsOk, text: `幀率 ${video.fps.toFixed(1)} fps，${video.frames} 幀` + (fpsOk ? "" : `（官方為 ${FPS} fps，可能播放速度不同）`) });
+          const sec = video.frames / video.fps;
+          if (sec > 10.5) lines.push({ ok: true, warn: true, text: `長度 ${sec.toFixed(1)} 秒（官方上限 10 秒）` });
+        }
+      }
+      add(!hasAudio, hasAudio ? "含音訊軌，需移除（官方轉碼會去除音訊）" : "無音訊軌");
+    }
+  } else {
+    add(false, "不是 PNG 或 MP4。JPG、GIF、一般影片請改用「圖片」或「動畫」模式轉換。");
+  }
+  const ok = lines.length > 0 && lines.every((l) => l.ok);
+  return { kind, ok, lines };
+}
+
+async function loadRaw(file) {
+  setMsg("檢查中…", 0);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const rep = inspectRaw(bytes);
+  const kb = bytes.length / 1024;
+  const size = kb >= 1024 ? (kb / 1024).toFixed(2) + " MB" : kb.toFixed(1) + " KB";
+  const text = rep.lines.map((l) => (!l.ok ? "✗ " : l.warn ? "△ " : "✓ ") + l.text).join("\n");
+  $("mOut").textContent = `檔案：${file.name} · ${size}\n${text}`;
+  if (rep.kind === "png") {
+    try { const bmp = await createImageBitmap(file); sctx.clearRect(0, 0, OUT_W, OUT_H); sctx.drawImage(bmp, 0, 0, OUT_W, OUT_H); bmp.close(); } catch (_) {}
+  }
+  if (!rep.ok) { ED.out = null; refreshSendBtn(); setMsg("格式不符，已阻擋傳送（原因見下方）。", 0); return; }
+  const stamp = String(Date.now()).slice(-6);
+  ED.out = rep.kind === "png"
+    ? { bytes, name: `c${stamp}.png`, mime: "image/png" }
+    : { bytes, name: `v${stamp}.mp4`, mime: "video/mp4" };
+  refreshSendBtn();
+  setMsg(`檢查通過，將以 ${ED.out.name} 直接傳送。`, 0);
 }
 
 async function convert() {
@@ -867,7 +1002,18 @@ async function sendOut() {
   try {
     log("inf", `開始傳輸 ${ED.out.name}（${ED.out.bytes.length} bytes）…`);
     const t0 = Date.now();
-    const r = await transferFile(ED.out.bytes, ED.out.name, FILE_TYPE_RESOURCE, (p, m) => setMsg(m, p));
+    let r;
+    for (;;) {
+      try {
+        r = await transferFile(ED.out.bytes, ED.out.name, FILE_TYPE_RESOURCE, (p, m) => setMsg(m, p));
+        break;
+      } catch (e) {
+        const timedOut = /等待回應逾時/.test(e.message || "");
+        if (!timedOut || !chr || !downgradeChunk("裝置無回應")) throw e;
+        setMsg("傳輸逾時，已降低寫入大小，重新傳送…", 0);
+        await sleep(1500);
+      }
+    }
     setMsg(`已傳輸到裝置 ✓（${((Date.now() - t0) / 1000).toFixed(1)} 秒）`, 100);
     log("inf", `傳輸完成：${r.name}，${r.packets} 包，CRC 0x${r.crc.toString(16)}`);
   } catch (e) {
@@ -920,11 +1066,14 @@ $("startRange").addEventListener("input", () => {
 $("lenRange").addEventListener("input", () => { ED.lenMs = Number($("lenRange").value); syncAnimSliders(); invalidate(); });
 $("mediaFile").addEventListener("change", () => loadMedia($("mediaFile").files[0]));
 document.querySelectorAll('input[name="mediaMode"]').forEach((r) => r.addEventListener("change", () => {
-  $("mediaFile").accept = edMode() === "image" ? "image/*" : "image/gif,video/*";
+  const m = edMode();
+  $("mediaFile").accept = m === "image" ? "image/*" : m === "raw" ? "image/png,video/mp4,.png,.mp4" : "image/gif,video/*";
+  $("btnConvert").hidden = m === "raw";
+  document.querySelector(".ctrls").hidden = m === "raw";
   $("mediaFile").value = "";
   stopPreview(); closeSrc(); invalidate();
   $("animCtrls").hidden = true;
-  setMsg("請選擇檔案。", 0);
+  setMsg(edMode() === "raw" ? "選擇已符合格式的 PNG 或 MP4，檢查通過後可直接傳送。" : "請選擇檔案。", 0);
 }));
 $("btnConvert").onclick = () => convert();
 $("btnSend").onclick = () => sendOut();
