@@ -71,10 +71,10 @@
       <div>
         <label for="chunk" class="hint" style="margin:0 0 4px">單次寫入大小（bytes）</label>
         <select id="chunk">
-          <option value="20" selected>20（相容性最高）</option>
+          <option value="20">20（相容性最高）</option>
           <option value="100">100</option>
           <option value="244">244</option>
-          <option value="512">512</option>
+          <option value="512" selected>512（預設）</option>
         </select>
       </div>
     </div>
@@ -176,7 +176,7 @@
     <progress id="mProg" max="100" value="0" style="width:100%;margin-top:10px"></progress>
     <div class="hint" id="mMsg">選擇檔案後，拖曳畫面調整構圖，再按「轉換」。</div>
     <div class="hint" id="mOut"></div>
-    <p class="hint">傳輸需數十秒到數分鐘，請保持畫面開啟並靠近卡片。若很慢，可把上方「單次寫入大小」改為 244 再試。</p>
+    <p class="hint">傳輸需數十秒到數分鐘，請保持畫面開啟並靠近卡片。預設單次寫入 512 bytes；若傳輸失敗或逾時，可把上方「單次寫入大小」改小（244 或 20）再試。</p>
   </section>
 
   <section class="card">
