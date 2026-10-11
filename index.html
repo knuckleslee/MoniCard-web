@@ -507,8 +507,7 @@ $("btnCards").onclick = () => guard(readCards);
 $("btnRaw").onclick = () => guard(sendRaw);
 $("btnClear").onclick = () => ($("log").textContent = "");
 $("btnCopy").onclick = async () => {
-  const text = Array.from($("log").children, (n) => n.textContent).join("
-");
+  const text = Array.from($("log").children, (n) => n.textContent).join("\n");
   if (!text) { log("inf", "日誌是空的"); return; }
   const btn = $("btnCopy"), label = btn.textContent;
   try {
