@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MoniCard Web Console</title>
+<style>
+  :root{
+    --bg:#0b0a12; --panel:#14131f; --line:#26243a; --text:#ecebf5; --muted:#8c89a8;
+    --accent:#35e0a1; --accent2:#8b7bff; --danger:#ff6b81; --warn:#ffcf5c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,"Noto Sans TC","Microsoft JhengHei",sans-serif}
+  main{max-width:880px;margin:0 auto;padding:20px 16px 60px}
+  h1{font-size:22px;margin:0 0 4px}
+  h2{font-size:15px;margin:0 0 12px;color:var(--accent2);letter-spacing:.04em}
+  .sub{color:var(--muted);margin:0 0 18px;font-size:13px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}
+  .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+  .kv{background:#0f0e18;border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+  .kv b{display:block;color:var(--muted);font-weight:500;font-size:12px}
+  .kv span{word-break:break-all}
+  button{background:#201e33;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 14px;font:inherit;cursor:pointer}
+  button:hover:not(:disabled){border-color:var(--accent2)}
+  button.primary{background:var(--accent);color:#04120c;border-color:var(--accent);font-weight:600}
+  button.danger{border-color:var(--danger);color:var(--danger)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  input[type=text],input[type=number],textarea,select{
+    background:#0f0e18;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:inherit;width:100%}
+  textarea{min-height:110px;resize:vertical}
+  label{display:flex;gap:8px;align-items:center}
+  .status{display:inline-flex;gap:8px;align-items:center;font-size:13px;color:var(--muted)}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--muted)}
+  .on .dot{background:var(--accent);box-shadow:0 0 8px var(--accent)}
+  .hint{color:var(--muted);font-size:12px;margin-top:6px}
+  .warn{border-color:var(--warn);color:var(--warn)}
+  #log{background:#07060c;border:1px solid var(--line);border-radius:8px;height:240px;overflow:auto;padding:8px 10px;
+       font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-all}
+  .tx{color:var(--accent2)} .rx{color:var(--accent)} .err{color:var(--danger)} .inf{color:var(--muted)}
+  .cards-list .kv{margin-top:8px;white-space:pre-wrap}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  @media(max-width:560px){.two{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+  <h1>MoniCard Web Console</h1>
+  <p class="sub">非官方 · 以 Web Bluetooth 直接連線魔力卡（MoniCard），不需微信。需 Chrome / Edge（桌機或 Android），並以 HTTPS 開啟。</p>
+
+  <div id="unsupported" class="card warn" hidden>
+    這個瀏覽器不支援 Web Bluetooth。請改用 Chrome / Edge（Windows、macOS、Linux、Android）；iOS 與 Firefox 目前無法使用。
+  </div>
+
+  <section class="card">
+    <h2>連線</h2>
+    <div class="two">
+      <div>
+        <label for="scanMode" class="hint" style="margin:0 0 4px">搜尋方式</label>
+        <select id="scanMode">
+          <option value="all">顯示所有裝置（最穩，建議）</option>
+          <option value="name">名稱以 MoniCard 開頭</option>
+          <option value="mfr">廠商代碼 0x8A3D（廣播資料 3D 8A）</option>
+        </select>
+      </div>
+      <div>
+        <label for="chunk" class="hint" style="margin:0 0 4px">單次寫入大小（bytes）</label>
+        <select id="chunk">
+          <option value="20" selected>20（相容性最高）</option>
+          <option value="100">100</option>
+          <option value="244">244</option>
+          <option value="512">512</option>
+        </select>
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button id="btnConnect" class="primary">連線裝置</button>
+      <button id="btnDisconnect" disabled>中斷</button>
+      <span id="status" class="status"><span class="dot"></span><span id="statusText">未連線</span></span>
+    </div>
+    <p class="hint">瀏覽器的藍牙選單會列出附近裝置；請選你的魔力卡。若找不到服務，請確認手機版微信沒有同時連著它。</p>
+  </section>
+
+  <section class="card">
+    <h2>裝置資訊</h2>
+    <div class="grid">
+      <div class="kv"><b>序號</b><span id="iSn">--</span></div>
+      <div class="kv"><b>韌體版本</b><span id="iVer">--</span></div>
+      <div class="kv"><b>電量</b><span id="iBat">--</span></div>
+      <div class="kv"><b>型號</b><span id="iProd">--</span></div>
+      <div class="kv"><b>儲存空間</b><span id="iFs">--</span></div>
+    </div>
+    <div class="row" style="margin-top:12px"><button data-need="1" id="btnInfo">重新讀取</button></div>
+  </section>
+
+  <section class="card">
+    <h2>名片資訊</h2>
+    <textarea id="cardText" placeholder="姓名&#10;電話&#10;公司"></textarea>
+    <div class="hint"><span id="cardBytes">0</span> / 319 bytes（UTF-8；中文每字約 3 bytes）</div>
+    <div class="row" style="margin-top:10px">
+      <button data-need="1" id="btnCardRead">從裝置讀取</button>
+      <button data-need="1" id="btnCardWrite" class="primary">寫入裝置</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>裝置設定</h2>
+    <div class="grid">
+      <label><input type="checkbox" id="c0"> 廣播</label>
+      <label><input type="checkbox" id="c1"> 蜂鳴器</label>
+      <label><input type="checkbox" id="c2"> 震動</label>
+      <label><input type="checkbox" id="c3"> 燈光</label>
+      <label><input type="checkbox" id="c4"> 近距離感應</label>
+      <label><input type="checkbox" id="c5"> 氛圍燈</label>
+    </div>
+    <div class="hint">勾選＝啟用。第 7、8 個保留位元會原樣寫回。</div>
+    <div class="row" style="margin-top:10px">
+      <button data-need="1" id="btnCtlRead">讀取</button>
+      <button data-need="1" id="btnCtlWrite" class="primary">寫入</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>標籤與輪播</h2>
+    <div class="two">
+      <div>
+        <label for="tags" class="hint" style="margin:0 0 4px">標籤（最多 5 個，格式 分類:ID，以逗號分隔）</label>
+        <input type="text" id="tags" placeholder="1:1, 2:2">
+        <div class="row" style="margin-top:8px"><button data-need="1" id="btnTags">寫入標籤</button></div>
+      </div>
+      <div>
+        <label for="carousel" class="hint" style="margin:0 0 4px">輪播間隔（秒，0–3600）</label>
+        <input type="number" id="carousel" min="0" max="3600" value="60">
+        <div class="row" style="margin-top:8px">
+          <button data-need="1" id="btnCarRead">讀取</button>
+          <button data-need="1" id="btnCarWrite">寫入</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>收到的名片</h2>
+    <div class="row">
+      <button data-need="1" id="btnCards">讀取全部</button>
+      <span class="hint" id="cardsCount"></span>
+    </div>
+    <div id="cardsList" class="cards-list"></div>
+  </section>
+
+  <section class="card">
+    <h2>進階：原始指令</h2>
+    <div class="two">
+      <div><label class="hint" style="margin:0 0 4px">指令編號（十進位或 0x）</label><input type="text" id="rawCmd" placeholder="18"></div>
+      <div><label class="hint" style="margin:0 0 4px">資料（hex，可留空）</label><input type="text" id="rawData" placeholder="01 00"></div>
+    </div>
+    <div class="row" style="margin-top:10px"><button data-need="1" id="btnRaw">送出（分類 31 控制）</button></div>
+    <p class="hint">回應會顯示在下方日誌。未實作：圖片／影片傳輸（分類 4）與韌體更新（分類 1）。</p>
+  </section>
+
+  <section class="card">
+    <h2>日誌</h2>
+    <div id="log"></div>
+    <div class="row" style="margin-top:8px"><button id="btnClear">清除</button></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+/* ---- Protocol constants (see README) ---- */
+const SERVICE  = "7369666c-695f-7364-0000-000000000000";
+const DATA_CHR = "7369666c-695f-7364-0002-000000000000";
+const CATE = { OTA: 1, FILE: 4, CONTROL: 31 };
+const CMD = {
+  SET_CARD_INFO: 14, RESP_CARD_INFO: 15, READ_CARD_INFO: 16, RESP_READ_CARD: 17,
+  GET_SERIAL: 18, GET_VERSION: 20, GET_BATTERY: 22,
+  CONTROL_INFO: 24, CONTROL_INFO_RESP: 25,
+  GET_FS_INFO: 32, GET_FS_INFO_RESP: 33,
+  SET_TAGS: 34, RESP_TAGS: 35,
+  READ_CARDS_COUNT: 36, RESP_CARDS_COUNT: 37,
+  READ_CARD_BY_ID: 38, RESP_CARD_BY_ID: 39,
+  DELETE_CARD: 40, RESP_DELETE_CARD: 41,
+  SET_CAROUSEL: 42, RESP_CAROUSEL: 43, READ_CAROUSEL: 44, RESP_CAROUSEL_RD: 45,
+  READ_PRODUCT: 70, RESP_PRODUCT: 71,
+};
+const CARD_MAX_BYTES = 319, TAGS_MAX = 5, CONTROL_BYTES = 8;
+
+const enc = new TextEncoder(), dec = new TextDecoder("utf-8");
+const $ = (id) => document.getElementById(id);
+const u16 = (b, o) => b[o] | (b[o + 1] << 8);
+const u32 = (b, o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
+const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join(" ");
+const concat = (...a) => { const o = new Uint8Array(a.reduce((n, x) => n + x.length, 0)); let p = 0; a.forEach((x) => { o.set(x, p); p += x.length; }); return o; };
+const trimZeros = (b) => { let n = b.length; while (n > 0 && b[n - 1] === 0) n--; return b.slice(0, n); };
+const ascii = (b) => Array.from(b).filter((x) => x > 0).map((x) => String.fromCharCode(x)).join("");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const normNl = (s) => String(s || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+/* ---- Logging ---- */
+function log(kind, msg) {
+  const el = $("log"), line = document.createElement("div");
+  line.className = kind;
+  line.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+/* ---- Frame encode / decode ---- */
+// Frame: [category][0][len16 LE][payload]; control payload = [cmd16 LE][data]
+const frame = (cate, payload) => concat(new Uint8Array([cate, 0, payload.length & 255, payload.length >> 8]), payload);
+const controlFrame = (cmd, data = new Uint8Array()) => frame(CATE.CONTROL, concat(new Uint8Array([cmd & 255, cmd >> 8]), data));
+
+// Split a full frame into BLE writes of at most writeSize bytes (= ATT MTU - 3).
+// Mirrors the vendor app: type 1 = first, 2 = middle, 3 = last; the loop runs over the
+// whole frame length, so a trailing empty "3" chunk can occur - the device accepts it.
+function splitFrame(f, writeSize) {
+  const e = writeSize - 4, cate = f[0];
+  if (f.length <= e) return [f];
+  const part = (t, n) => f.slice(4 + t, 4 + t + n);
+  const out = [];
+  for (let t = 0; t < f.length; ) {
+    const left = f.length - t;
+    if (t === 0) {
+      out.push(concat(new Uint8Array([cate, 1, (f.length - 4) & 255, (f.length - 4) >> 8]), part(t, e)));
+      t += e;
+    } else if (left > e) {
+      out.push(concat(new Uint8Array([cate, 2]), part(t, e)));
+      t += e;
+    } else {
+      out.push(concat(new Uint8Array([cate, 3]), part(t, left)));
+      t += left;
+    }
+  }
+  return out;
+}
+
+/* ---- Connection state ---- */
+let device = null, chr = null, assembling = null, busy = Promise.resolve();
+const pending = []; // {cate, cmd, resolve, reject, timer}
+
+function setStatus(on, text) {
+  $("status").classList.toggle("on", on);
+  $("statusText").textContent = text;
+  $("btnConnect").disabled = on;
+  $("btnDisconnect").disabled = !on;
+  document.querySelectorAll("[data-need]").forEach((b) => (b.disabled = !on));
+}
+
+function onNotify(ev) {
+  const v = ev.target.value, b = new Uint8Array(v.buffer, v.byteOffset, v.byteLength).slice();
+  log("rx", "RX " + hex(b));
+  if (b.length < 2) return;
+  let full = null;
+  const type = b[1];
+  if (type === 0) {
+    const len = u16(b, 2);
+    full = { cate: b[0], payload: b.slice(4, 4 + len) };
+  } else if (type === 1) {
+    assembling = { cate: b[0], length: u16(b, 2), chunks: [b.slice(4)] };
+    return;
+  } else if (assembling) {
+    assembling.chunks.push(b.slice(2));
+    if (type !== 3) return;
+    full = { cate: assembling.cate, payload: concat(...assembling.chunks).slice(0, assembling.length) };
+    assembling = null;
+  } else return;
+  if (full.payload.length < 2) return;
+  const msg = { cate: full.cate, cmd: u16(full.payload, 0), data: full.payload.slice(2) };
+  log("inf", `   cate=${msg.cate} cmd=${msg.cmd} data=${hex(msg.data) || "(empty)"}`);
+  const i = pending.findIndex((p) => p.cate === msg.cate && p.cmd === msg.cmd);
+  if (i >= 0) { const p = pending.splice(i, 1)[0]; clearTimeout(p.timer); p.resolve(msg); }
+}
+
+async function writeAll(buf) {
+  const size = Number($("chunk").value);
+  const noResp = chr.properties.writeWithoutResponse;
+  for (const part of splitFrame(buf, size)) {
+    log("tx", "TX " + hex(part));
+    if (noResp) await chr.writeValueWithoutResponse(part);
+    else await chr.writeValueWithResponse(part);
+  }
+}
+
+// Send one control command and wait for its response (serialised).
+function request(cmd, data, respCmd, timeout = 3000) {
+  const run = async () => {
+    if (!chr) throw new Error("尚未連線");
+    const waiter = new Promise((resolve, reject) => {
+      if (respCmd == null) return resolve(null);
+      const p = { cate: CATE.CONTROL, cmd: respCmd, resolve, reject };
+      p.timer = setTimeout(() => {
+        const i = pending.indexOf(p); if (i >= 0) pending.splice(i, 1);
+        reject(new Error(`等待回應逾時（cmd ${respCmd}）`));
+      }, timeout);
+      pending.push(p);
+    });
+    await writeAll(controlFrame(cmd, data));
+    return waiter;
+  };
+  const p = busy.then(run, run);
+  busy = p.catch(() => {});
+  return p;
+}
+
+const status = (msg) => (msg && msg.data.length >= 2 ? u16(msg.data, 0) : 0);
+function mustOk(msg, what) { const s = status(msg); if (s !== 0) throw new Error(`${what}失敗（狀態碼 ${s}）`); }
+
+/* ---- Connect ---- */
+async function connect() {
+  if (!navigator.bluetooth) return;
+  const mode = $("scanMode").value;
+  const opts = { optionalServices: [SERVICE] };
+  if (mode === "name") opts.filters = [{ namePrefix: "MoniCard" }, { namePrefix: "monicard" }];
+  else if (mode === "mfr") opts.filters = [{ manufacturerData: [{ companyIdentifier: 0x8a3d }] }];
+  else opts.acceptAllDevices = true;
+  try {
+    device = await navigator.bluetooth.requestDevice(opts);
+  } catch (e) { log("err", "選擇裝置失敗：" + e.message); return; }
+  device.addEventListener("gattserverdisconnected", () => {
+    log("inf", "裝置已中斷連線"); chr = null; assembling = null; setStatus(false, "未連線");
+    pending.splice(0).forEach((p) => { clearTimeout(p.timer); p.reject(new Error("連線中斷")); });
+  });
+  setStatus(false, "連線中…");
+  try {
+    const server = await device.gatt.connect();
+    let svc;
+    try { svc = await server.getPrimaryService(SERVICE); }
+    catch (e) {
+      const all = await server.getPrimaryServices().catch(() => []);
+      throw new Error("找不到 MoniCard 服務。裝置的服務：" + (all.map((s) => s.uuid).join(", ") || "（無／不可讀）"));
+    }
+    chr = await svc.getCharacteristic(DATA_CHR);
+    chr.addEventListener("characteristicvaluechanged", onNotify);
+    await chr.startNotifications();
+    setStatus(true, `已連線：${device.name || device.id}`);
+    log("inf", "連線成功");
+    await refreshInfo();
+  } catch (e) {
+    log("err", "連線失敗：" + e.message);
+    try { device.gatt.disconnect(); } catch (_) {}
+    setStatus(false, "未連線");
+  }
+}
+
+/* ---- Actions ---- */
+async function guard(fn) {
+  try { await fn(); } catch (e) { log("err", e.message || String(e)); }
+}
+
+async function refreshInfo() {
+  const one = [1, 0];
+  const sn = await request(CMD.GET_SERIAL, new Uint8Array(one), CMD.GET_SERIAL + 1);
+  $("iSn").textContent = ascii(sn.data) || "--";
+  const bat = await request(CMD.GET_BATTERY, new Uint8Array(one), CMD.GET_BATTERY + 1);
+  $("iBat").textContent = bat.data.length >= 2 ? u16(bat.data, 0) : "--";
+  const ver = await request(CMD.GET_VERSION, new Uint8Array(one), CMD.GET_VERSION + 1);
+  $("iVer").textContent = ascii(ver.data) || "--";
+  try {
+    const prod = await request(CMD.READ_PRODUCT, new Uint8Array(), CMD.RESP_PRODUCT, 1500);
+    $("iProd").textContent = ascii(prod.data) || "gen1";
+  } catch { $("iProd").textContent = "gen1（無回應）"; }
+  try {
+    const fs = await request(CMD.GET_FS_INFO, new Uint8Array([1]), CMD.GET_FS_INFO_RESP);
+    if (fs.data.length >= 12) {
+      const bs = u32(fs.data, 0), tb = u32(fs.data, 4), fb = u32(fs.data, 8);
+      const fmt = (n) => (n >= 1048576 ? (n / 1048576).toFixed(2) + " MB" : (n / 1024).toFixed(1) + " KB");
+      $("iFs").textContent = `剩餘 ${fmt(bs * fb)} / 共 ${fmt(bs * tb)}`;
+    }
+  } catch { $("iFs").textContent = "--"; }
+}
+
+async function readCard() {
+  const r = await request(CMD.READ_CARD_INFO, new Uint8Array([1]), CMD.RESP_READ_CARD, 3000);
+  $("cardText").value = normNl(dec.decode(trimZeros(r.data)));
+  updateCardBytes();
+}
+async function writeCard() {
+  const bytes = enc.encode(normNl($("cardText").value));
+  if (bytes.length > CARD_MAX_BYTES) throw new Error(`名片內容超過 ${CARD_MAX_BYTES} bytes（目前 ${bytes.length}）`);
+  mustOk(await request(CMD.SET_CARD_INFO, bytes, CMD.RESP_CARD_INFO, 5000), "寫入名片");
+  log("inf", "名片已寫入");
+}
+
+let ctlBytes = new Uint8Array([1, 1, 1, 1, 1, 0, 0, 1]);
+async function readCtl() {
+  const r = await request(CMD.CONTROL_INFO, new Uint8Array([1]), CMD.CONTROL_INFO_RESP);
+  if (r.data.length < CONTROL_BYTES) throw new Error("設備控制資訊回應異常");
+  ctlBytes = r.data.slice(0, CONTROL_BYTES);
+  for (let i = 0; i < 6; i++) $("c" + i).checked = ctlBytes[i] !== 0;
+}
+async function writeCtl() {
+  const b = ctlBytes.slice();
+  for (let i = 0; i < 6; i++) b[i] = $("c" + i).checked ? 1 : 0;
+  mustOk(await request(CMD.CONTROL_INFO, concat(new Uint8Array([2]), b), CMD.CONTROL_INFO_RESP), "寫入設定");
+  ctlBytes = b;
+  log("inf", "設定已寫入");
+}
+
+async function writeTags() {
+  const items = $("tags").value.split(/[,，\s]+/).filter(Boolean).map((s) => {
+    const m = /^(\d+):(\d+)$/.exec(s);
+    if (!m || +m[1] > 255 || +m[2] > 65535) throw new Error(`標籤格式錯誤：${s}`);
+    return [+m[1], +m[2]];
+  });
+  if (items.length > TAGS_MAX) throw new Error(`標籤最多 ${TAGS_MAX} 個`);
+  const d = [items.length];
+  items.forEach(([c, id]) => d.push(c, id & 255, id >> 8));
+  mustOk(await request(CMD.SET_TAGS, new Uint8Array(d), CMD.RESP_TAGS), "寫入標籤");
+  log("inf", "標籤已寫入");
+}
+
+async function readCarousel() {
+  const r = await request(CMD.READ_CAROUSEL, new Uint8Array([1]), CMD.RESP_CAROUSEL_RD);
+  if (r.data.length >= 2) $("carousel").value = u16(r.data, 0);
+}
+async function writeCarousel() {
+  const v = Math.max(0, Math.min(3600, parseInt($("carousel").value, 10) || 0));
+  mustOk(await request(CMD.SET_CAROUSEL, new Uint8Array([v & 255, v >> 8]), CMD.RESP_CAROUSEL), "寫入輪播");
+  log("inf", "輪播間隔已寫入");
+}
+
+async function readCards() {
+  const list = $("cardsList"); list.textContent = "";
+  const c = await request(CMD.READ_CARDS_COUNT, new Uint8Array([1]), CMD.RESP_CARDS_COUNT);
+  const n = c.data.length >= 2 ? u16(c.data, 0) : 0;
+  $("cardsCount").textContent = `共 ${n} 張`;
+  for (let id = 0; id < n; id++) {
+    const r = await request(CMD.READ_CARD_BY_ID, new Uint8Array([1, id & 255]), CMD.RESP_CARD_BY_ID);
+    const d = r.data;
+    if (d.length < 14 || d[0] !== 0) { log("inf", `名片 #${id} 無資料`); continue; }
+    const item = document.createElement("div"); item.className = "kv";
+    const sid = d[1], mac = ascii(d.slice(2, 14));
+    item.textContent = `#${sid}  ${mac}\n${normNl(dec.decode(trimZeros(d.slice(14))))}`;
+    const del = document.createElement("button");
+    del.textContent = "刪除"; del.className = "danger"; del.style.marginTop = "8px"; del.style.display = "block";
+    del.onclick = () => guard(async () => {
+      if (!confirm(`確定刪除名片 #${sid}？`)) return;
+      mustOk(await request(CMD.DELETE_CARD, new Uint8Array([2, sid & 255]), CMD.RESP_DELETE_CARD), "刪除名片");
+      await readCards();
+    });
+    item.appendChild(del);
+    list.appendChild(item);
+  }
+}
+
+async function sendRaw() {
+  const c = parseInt($("rawCmd").value.trim(), $("rawCmd").value.trim().startsWith("0x") ? 16 : 10);
+  if (!Number.isInteger(c) || c < 0 || c > 65535) throw new Error("指令編號無效");
+  const h = $("rawData").value.replace(/[^0-9a-fA-F]/g, "");
+  if (h.length % 2) throw new Error("hex 資料長度必須為偶數");
+  const d = new Uint8Array(h.length / 2).map((_, i) => parseInt(h.substr(i * 2, 2), 16));
+  await request(c, d, null);
+}
+
+function updateCardBytes() { $("cardBytes").textContent = enc.encode(normNl($("cardText").value)).length; }
+
+/* ---- Wire up ---- */
+if (!navigator.bluetooth) $("unsupported").hidden = false;
+setStatus(false, "未連線");
+$("btnConnect").onclick = () => connect();
+$("btnDisconnect").onclick = () => { if (device && device.gatt.connected) device.gatt.disconnect(); };
+$("btnInfo").onclick = () => guard(refreshInfo);
+$("btnCardRead").onclick = () => guard(readCard);
+$("btnCardWrite").onclick = () => guard(writeCard);
+$("btnCtlRead").onclick = () => guard(readCtl);
+$("btnCtlWrite").onclick = () => guard(writeCtl);
+$("btnTags").onclick = () => guard(writeTags);
+$("btnCarRead").onclick = () => guard(readCarousel);
+$("btnCarWrite").onclick = () => guard(writeCarousel);
+$("btnCards").onclick = () => guard(readCards);
+$("btnRaw").onclick = () => guard(sendRaw);
+$("btnClear").onclick = () => ($("log").textContent = "");
+$("cardText").addEventListener("input", updateCardBytes);
+</script>
+</body>
+</html>
