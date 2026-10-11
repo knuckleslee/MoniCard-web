@@ -321,25 +321,43 @@ async function connect() {
     pending.splice(0).forEach((p) => { clearTimeout(p.timer); p.reject(new Error("連線中斷")); });
   });
   setStatus(false, "連線中…");
-  try {
-    const server = await device.gatt.connect();
-    let svc;
-    try { svc = await server.getPrimaryService(SERVICE); }
-    catch (e) {
-      const all = await server.getPrimaryServices().catch(() => []);
-      throw new Error("找不到 MoniCard 服務。裝置的服務：" + (all.map((s) => s.uuid).join(", ") || "（無／不可讀）"));
+  const errText = (e) => `${e && e.name ? e.name + ": " : ""}${(e && e.message) || e}`;
+  let ready = false;
+  for (let attempt = 1; attempt <= 3 && !ready; attempt++) {
+    try {
+      log("inf", `GATT 連線中（第 ${attempt} 次）…`);
+      const server = await device.gatt.connect();
+      await sleep(400); // some stacks need a moment before service discovery
+      let svc;
+      try { svc = await server.getPrimaryService(SERVICE); }
+      catch (e) {
+        const all = await server.getPrimaryServices().catch(() => []);
+        log("err", "找不到 MoniCard 服務（若為空表示瀏覽器未授權讀取）。裝置的服務：" +
+          (all.map((s) => s.uuid).join(", ") || "（無）"));
+        throw e;
+      }
+      const chars = await svc.getCharacteristics().catch(() => []);
+      chars.forEach((c) => log("inf", `特徵 ${c.uuid} 屬性：` +
+        Object.keys(c.properties).filter((k) => c.properties[k]).join(",")));
+      chr = await svc.getCharacteristic(DATA_CHR);
+      chr.addEventListener("characteristicvaluechanged", onNotify);
+      await chr.startNotifications();
+      ready = true;
+    } catch (e) {
+      log("err", `連線失敗（第 ${attempt} 次）：${errText(e)}`);
+      try { device.gatt.disconnect(); } catch (_) {}
+      chr = null;
+      if (attempt < 3) await sleep(1500);
     }
-    chr = await svc.getCharacteristic(DATA_CHR);
-    chr.addEventListener("characteristicvaluechanged", onNotify);
-    await chr.startNotifications();
-    setStatus(true, `已連線：${device.name || device.id}`);
-    log("inf", "連線成功");
-    await refreshInfo();
-  } catch (e) {
-    log("err", "連線失敗：" + e.message);
-    try { device.gatt.disconnect(); } catch (_) {}
-    setStatus(false, "未連線");
   }
+  if (!ready) {
+    log("err", "無法建立連線。請確認：手機微信未連著卡片、卡片已開機且在身邊、在作業系統藍牙設定中移除舊配對後重試。");
+    setStatus(false, "未連線");
+    return;
+  }
+  setStatus(true, `已連線：${device.name || device.id}`);
+  log("inf", "連線成功，讀取裝置資訊…");
+  try { await refreshInfo(); } catch (e) { log("err", "讀取資訊失敗（連線仍保留）：" + errText(e)); }
 }
 
 /* ---- Actions ---- */
@@ -348,25 +366,34 @@ async function guard(fn) {
 }
 
 async function refreshInfo() {
-  const one = [1, 0];
-  const sn = await request(CMD.GET_SERIAL, new Uint8Array(one), CMD.GET_SERIAL + 1);
-  $("iSn").textContent = ascii(sn.data) || "--";
-  const bat = await request(CMD.GET_BATTERY, new Uint8Array(one), CMD.GET_BATTERY + 1);
-  $("iBat").textContent = bat.data.length >= 2 ? u16(bat.data, 0) : "--";
-  const ver = await request(CMD.GET_VERSION, new Uint8Array(one), CMD.GET_VERSION + 1);
-  $("iVer").textContent = ascii(ver.data) || "--";
-  try {
-    const prod = await request(CMD.READ_PRODUCT, new Uint8Array(), CMD.RESP_PRODUCT, 1500);
-    $("iProd").textContent = ascii(prod.data) || "gen1";
-  } catch { $("iProd").textContent = "gen1（無回應）"; }
-  try {
-    const fs = await request(CMD.GET_FS_INFO, new Uint8Array([1]), CMD.GET_FS_INFO_RESP);
-    if (fs.data.length >= 12) {
-      const bs = u32(fs.data, 0), tb = u32(fs.data, 4), fb = u32(fs.data, 8);
+  const one = new Uint8Array([1, 0]);
+  const step = async (label, fn) => {
+    try { await fn(); } catch (e) { log("err", `${label}：${e.message}`); }
+  };
+  await step("序號", async () => {
+    const r = await request(CMD.GET_SERIAL, one, CMD.GET_SERIAL + 1);
+    $("iSn").textContent = ascii(r.data) || "--";
+  });
+  await step("電量", async () => {
+    const r = await request(CMD.GET_BATTERY, one, CMD.GET_BATTERY + 1);
+    $("iBat").textContent = r.data.length >= 2 ? u16(r.data, 0) : "--";
+  });
+  await step("版本", async () => {
+    const r = await request(CMD.GET_VERSION, one, CMD.GET_VERSION + 1);
+    $("iVer").textContent = ascii(r.data) || "--";
+  });
+  await step("型號", async () => {
+    const r = await request(CMD.READ_PRODUCT, new Uint8Array(), CMD.RESP_PRODUCT, 1500);
+    $("iProd").textContent = ascii(r.data) || "gen1";
+  });
+  await step("儲存空間", async () => {
+    const r = await request(CMD.GET_FS_INFO, new Uint8Array([1]), CMD.GET_FS_INFO_RESP);
+    if (r.data.length >= 12) {
+      const bs = u32(r.data, 0), tb = u32(r.data, 4), fb = u32(r.data, 8);
       const fmt = (n) => (n >= 1048576 ? (n / 1048576).toFixed(2) + " MB" : (n / 1024).toFixed(1) + " KB");
       $("iFs").textContent = `剩餘 ${fmt(bs * fb)} / 共 ${fmt(bs * tb)}`;
     }
-  } catch { $("iFs").textContent = "--"; }
+  });
 }
 
 async function readCard() {
