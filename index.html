@@ -39,6 +39,11 @@
        font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-all}
   .tx{color:var(--accent2)} .rx{color:var(--accent)} .err{color:var(--danger)} .inf{color:var(--muted)}
   .cards-list .kv{margin-top:8px;white-space:pre-wrap}
+  .editor{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px}
+  #stage{width:240px;height:320px;max-width:100%;background:#000;border:1px solid var(--line);border-radius:8px;touch-action:none;cursor:grab}
+  .ctrls{flex:1;min-width:220px}
+  .ctrls input[type=range]{width:100%}
+  progress{accent-color:var(--accent)}
   .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   @media(max-width:560px){.two{grid-template-columns:1fr}}
 </style>
@@ -137,6 +142,41 @@
         </div>
       </div>
     </div>
+  </section>
+
+  <section class="card">
+    <h2>圖片／動畫 轉換與上傳</h2>
+    <div class="row">
+      <label><input type="radio" name="mediaMode" value="image" checked> 圖片（轉為 240×320 PNG）</label>
+      <label><input type="radio" name="mediaMode" value="anim"> 動畫（GIF／影片，最長 10 秒，轉為 MJPEG MP4）</label>
+    </div>
+    <div class="row" style="margin-top:10px"><input type="file" id="mediaFile" accept="image/*"></div>
+    <div class="editor">
+      <canvas id="stage" width="240" height="320"></canvas>
+      <div class="ctrls">
+        <label class="hint" style="display:block">縮放 <span id="zoomLbl">100%</span>（也可滾輪；拖曳畫面調整位置）</label>
+        <input type="range" id="zoom" min="100" max="400" value="100">
+        <div class="row" style="margin-top:8px"><button id="btnReset">重設構圖</button></div>
+        <div id="animCtrls" hidden>
+          <label class="hint" style="display:block;margin-top:10px">起點 <span id="startLbl">0.0s</span></label>
+          <input type="range" id="startRange" min="0" max="0" step="100" value="0">
+          <label class="hint" style="display:block;margin-top:6px">長度 <span id="lenLbl">0.0s</span>（最長 10 秒）</label>
+          <input type="range" id="lenRange" min="500" max="10000" step="100" value="5000">
+          <label class="hint" style="display:block;margin-top:6px">畫質（JPEG Q 值，越大檔案越小）</label>
+          <select id="qval"><option value="5" selected>5（最佳）</option><option value="13">13</option><option value="18">18（最小）</option></select>
+          <div class="row" style="margin-top:8px"><button id="btnPlay">播放預覽</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button id="btnConvert" class="primary">轉換</button>
+      <button id="btnSend" disabled>傳送到裝置</button>
+      <button id="btnDl" disabled>下載檔案</button>
+    </div>
+    <progress id="mProg" max="100" value="0" style="width:100%;margin-top:10px"></progress>
+    <div class="hint" id="mMsg">選擇檔案後，拖曳畫面調整構圖，再按「轉換」。</div>
+    <div class="hint" id="mOut"></div>
+    <p class="hint">傳輸需數十秒到數分鐘，請保持畫面開啟並靠近卡片。若很慢，可把上方「單次寫入大小」改為 244 再試。</p>
   </section>
 
   <section class="card">
@@ -239,8 +279,166 @@ function splitFrame(f, writeSize) {
   return out;
 }
 
+/* ---- File transfer (category 4) ---- */
+const FILE_CMD = {
+  START_REQUEST: 0, START_RESPONSE: 1, FILE_SEND_START_REQUEST: 2, FILE_SEND_START_RESPONSE: 3,
+  FILE_SEND_DATA_REQUEST: 4, FILE_SEND_DATA_RESPONSE: 5, FILE_SEND_END_REQUEST: 6, FILE_SEND_END_RESPONSE: 7,
+  END_REQUEST: 8, END_RESPONSE: 9, LOSE_CHECK_REQUEST: 10, LOSE_CHECK_RESPONSE: 11,
+  FILE_INFO_REQUEST: 13, FILE_INFO_RESPONSE: 14,
+};
+const FILE_TYPE_RESOURCE = 1, FILE_BLOCK = 10240, FILE_SPACE_MARGIN = 51200;
+const FILE_STATUS_TEXT = {
+  1: "裝置儲存空間不足，請刪除部分素材後重試", 2: "檔案類型不被裝置支援",
+  3: "檔案大小超出裝置限制", 4: "檔案名稱格式不正確", 5: "傳輸校驗失敗，請重試",
+};
+const u16le = (v) => new Uint8Array([v & 255, (v >> 8) & 255]);
+const u32le = (v) => new Uint8Array([v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255]);
+const str8 = (t) => Uint8Array.from(String(t), (ch) => ch.charCodeAt(0) & 255);
+// File messages: [cmd16][len16][data], wrapped in a category-4 frame.
+const fileMsg = (cmd, data = new Uint8Array()) => frame(CATE.FILE, concat(u16le(cmd), u16le(data.length), data));
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = (n << 24) >>> 0;
+    for (let k = 0; k < 8; k++) c = c & 0x80000000 ? ((c << 1) ^ 0x04c11db7) >>> 0 : (c << 1) >>> 0;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crcMpeg2(bytes) {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) crc = (((crc << 8) >>> 0) ^ CRC_TABLE[((crc >>> 24) ^ bytes[i]) & 255]) >>> 0;
+  return crc >>> 0;
+}
+// Pad to 4 bytes, append CRC32 (little-endian) of the padded data.
+function prepareTransferBytes(bytes) {
+  const aligned = (bytes.length + 3) & -4;
+  const out = new Uint8Array(aligned + 4);
+  out.set(bytes);
+  const crc = crcMpeg2(out.subarray(0, aligned));
+  out.set(u32le(crc), aligned);
+  return { transferBytes: out, totalLength: out.length, crcValue: crc };
+}
+function packetSizeFor(mtu) {
+  const MAX = 10240;
+  if (mtu && mtu > 0) {
+    const n = mtu - 7, a = Math.max(256, 50 * n - 8);
+    return Math.max(256, Math.min(MAX, a, MAX));
+  }
+  return MAX;
+}
+function fileStatus(msg) {
+  if (!msg || msg.data.length < 2) return 0;
+  const len = u16(msg.data, 0), payload = msg.data.slice(2, 2 + len);
+  return payload.length >= 2 ? u16(payload, 0) : 0;
+}
+function fileOk(msg, what) {
+  const st = fileStatus(msg);
+  if (st !== 0) throw new Error(`${what}失敗：${FILE_STATUS_TEXT[st] || "狀態碼 " + st}`);
+  return msg;
+}
+
+/* ---- MJPEG MP4 muxer (same box layout as the vendor app) ---- */
+function buildMjpegMp4(frames, opt) {
+  const be32 = (v) => new Uint8Array([(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255]);
+  const be16 = (v) => new Uint8Array([(v >> 8) & 255, v & 255]);
+  const fx = (v) => be32((v << 16) >>> 0);
+  const str = (t) => Uint8Array.from(String(t), (ch) => ch.charCodeAt(0) & 255);
+  const zeros = (n) => new Uint8Array(n);
+  const box = (type, parts) => { const body = concat(...parts); return concat(be32(body.length + 8), str(type), body); };
+  const fbox = (type, ver, flags, parts) =>
+    box(type, [new Uint8Array([ver, (flags >> 16) & 255, (flags >> 8) & 255, flags & 255]), ...parts]);
+  if (!frames.length) throw new Error("MP4 封裝失敗：沒有影格");
+  const count = frames.length;
+  const fps = Math.max(1, Math.round((opt && opt.frameRate) || 20));
+  const w = Math.max(1, Math.round((opt && opt.width) || 240));
+  const h = Math.max(1, Math.round((opt && opt.height) || 320));
+  const durMs = Math.round((count / fps) * 1000);
+  const comp = zeros(32); const cn = "Motion JPEG"; comp[0] = cn.length;
+  for (let i = 0; i < cn.length; i++) comp[i + 1] = cn.charCodeAt(i);
+  const ftyp = box("ftyp", [str("isom"), be32(512), str("isom"), str("iso2"), str("mp41"), str("mjpg")]);
+  const mdat = box("mdat", frames);
+  const mjpg = box("mjpg", [zeros(6), be16(1), be16(0), be16(0), be32(0), be32(0), be32(0), be16(w), be16(h),
+    be32(4718592), be32(4718592), be32(0), be16(1), comp, be16(24), be16(65535)]);
+  const stbl = box("stbl", [
+    fbox("stsd", 0, 0, [be32(1), mjpg]),
+    fbox("stts", 0, 0, [be32(1), be32(count), be32(1)]),
+    fbox("stsc", 0, 0, [be32(1), be32(1), be32(count), be32(1)]),
+    fbox("stsz", 0, 0, [be32(0), be32(count), ...frames.map((f) => be32(f.byteLength))]),
+    fbox("stco", 0, 0, [be32(1), be32(ftyp.length + 8)]),
+    fbox("stss", 0, 0, [be32(count), ...frames.map((_, i) => be32(i + 1))]),
+  ]);
+  const minf = box("minf", [
+    fbox("vmhd", 0, 1, [be16(0), be16(0), be16(0), be16(0)]),
+    box("dinf", [fbox("dref", 0, 0, [be32(1), fbox("url ", 0, 1, [])])]),
+    stbl,
+  ]);
+  const mdia = box("mdia", [
+    fbox("mdhd", 0, 0, [be32(0), be32(0), be32(fps), be32(Math.max(1, count)), be16(21956), be16(0)]),
+    fbox("hdlr", 0, 0, [be32(0), str("vide"), be32(0), be32(0), be32(0), str("VideoHandler"), new Uint8Array([0])]),
+    minf,
+  ]);
+  const dm = Math.max(1, durMs);
+  const trak = box("trak", [
+    fbox("tkhd", 0, 7, [be32(0), be32(0), be32(1), be32(0), be32(dm), zeros(8), be16(0), be16(0), be16(0), be16(0),
+      fx(1), be32(0), be32(0), be32(0), fx(1), be32(0), be32(0), be32(0), be32(1073741824), fx(w), fx(h)]),
+    mdia,
+  ]);
+  const moov = box("moov", [
+    fbox("mvhd", 0, 0, [be32(0), be32(0), be32(1000), be32(dm), fx(1), be16((1 << 8) & 65535), be16(0), zeros(8),
+      fx(1), be32(0), be32(0), be32(0), fx(1), be32(0), be32(0), be32(0), be32(1073741824), zeros(24), be32(2)]),
+    trak,
+  ]);
+  return concat(ftyp, mdat, moov);
+}
+
+/* ---- Transfer a file to the device ---- */
+async function transferFile(bytes, name, fileType, onProgress) {
+  const say = (p, m) => onProgress && onProgress(p, m);
+  const safe = String(name).replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "") || "image.png";
+  if (!chr) throw new Error("尚未連線");
+  say(4, "校驗檔案");
+  const pkg = prepareTransferBytes(bytes);
+  say(8, "檢查裝置剩餘空間");
+  try {
+    const fs = await request(CMD.GET_FS_INFO, new Uint8Array([1]), CMD.GET_FS_INFO_RESP);
+    if (fs.data.length >= 12) {
+      const free = u32(fs.data, 0) * u32(fs.data, 8);
+      if (pkg.totalLength + FILE_SPACE_MARGIN > free) {
+        const e = new Error(`裝置儲存空間不足：需要約 ${Math.ceil((pkg.totalLength + FILE_SPACE_MARGIN) / 1024)} KB，剩餘約 ${Math.floor(free / 1024)} KB`);
+        e.noSpace = true; throw e;
+      }
+    }
+  } catch (e) { if (e.noSpace) throw e; log("inf", "空間預檢略過：" + e.message); }
+
+  const phone = /iPhone|iPad|iPod/i.test(navigator.userAgent) ? 1 : 2;
+  say(12, "建立傳輸工作階段");
+  fileOk(await sendFile(FILE_CMD.START_REQUEST, concat(u16le(fileType), new Uint8Array([phone]), u32le(pkg.totalLength)),
+    FILE_CMD.START_RESPONSE, 10000), "傳輸初始化");
+  fileOk(await sendFile(FILE_CMD.FILE_INFO_REQUEST, u32le(Math.max(1, Math.ceil(pkg.totalLength / FILE_BLOCK))),
+    FILE_CMD.FILE_INFO_RESPONSE, 10000), "提交檔案資訊");
+  const nameBytes = str8(safe);
+  fileOk(await sendFile(FILE_CMD.FILE_SEND_START_REQUEST, concat(u32le(pkg.totalLength), u16le(nameBytes.length), nameBytes),
+    FILE_CMD.FILE_SEND_START_RESPONSE, 10000), "開始傳輸");
+
+  const size = packetSizeFor(Number($("chunk").value) + 3);
+  const total = Math.max(1, Math.ceil(pkg.transferBytes.length / size));
+  for (let i = 0; i < total; i++) {
+    const part = pkg.transferBytes.slice(i * size, (i + 1) * size);
+    fileOk(await sendFile(FILE_CMD.FILE_SEND_DATA_REQUEST, concat(u32le(i), part),
+      FILE_CMD.FILE_SEND_DATA_RESPONSE, 10000), `傳送第 ${i + 1}/${total} 包`);
+    say(20 + Math.round(((i + 1) / total) * 72), `傳送中 ${i + 1}/${total}`);
+  }
+  say(94, "完成裝置端寫入");
+  fileOk(await sendFile(FILE_CMD.FILE_SEND_END_REQUEST, u16le(0), FILE_CMD.FILE_SEND_END_RESPONSE, 30000), "結束確認");
+  fileOk(await sendFile(FILE_CMD.END_REQUEST, new Uint8Array(), FILE_CMD.END_RESPONSE, 30000), "總結束確認");
+  say(100, "已傳輸到裝置");
+  return { name: safe, size: bytes.length, transferSize: pkg.totalLength, packets: total, crc: pkg.crcValue };
+}
+
 /* ---- Connection state ---- */
-let device = null, chr = null, assembling = null, busy = Promise.resolve();
+let device = null, chr = null, assembling = null, busy = Promise.resolve(), writeLock = Promise.resolve(), quiet = false;
 const pending = []; // {cate, cmd, resolve, reject, timer}
 
 function setStatus(on, text) {
@@ -249,11 +447,12 @@ function setStatus(on, text) {
   $("btnConnect").disabled = on;
   $("btnDisconnect").disabled = !on;
   document.querySelectorAll("[data-need]").forEach((b) => (b.disabled = !on));
+  if (typeof refreshSendBtn === "function") { try { refreshSendBtn(); } catch (_) {} }
 }
 
 function onNotify(ev) {
   const v = ev.target.value, b = new Uint8Array(v.buffer, v.byteOffset, v.byteLength).slice();
-  log("rx", "RX " + hex(b));
+  if (!quiet) log("rx", "RX " + hex(b));
   if (b.length < 2) return;
   let full = null;
   const type = b[1];
@@ -271,41 +470,56 @@ function onNotify(ev) {
   } else return;
   if (full.payload.length < 2) return;
   const msg = { cate: full.cate, cmd: u16(full.payload, 0), data: full.payload.slice(2) };
-  log("inf", `   cate=${msg.cate} cmd=${msg.cmd} data=${hex(msg.data) || "(empty)"}`);
+  if (!quiet) log("inf", `   cate=${msg.cate} cmd=${msg.cmd} data=${hex(msg.data) || "(empty)"}`);
+  if (msg.cate === CATE.FILE && msg.cmd === FILE_CMD.LOSE_CHECK_REQUEST) {
+    // The device periodically asks whether packets were lost; answer "none lost".
+    writeAll(fileMsg(FILE_CMD.LOSE_CHECK_RESPONSE, u16le(0))).catch(() => {});
+    return;
+  }
   const i = pending.findIndex((p) => p.cate === msg.cate && p.cmd === msg.cmd);
   if (i >= 0) { const p = pending.splice(i, 1)[0]; clearTimeout(p.timer); p.resolve(msg); }
 }
 
-async function writeAll(buf) {
-  const size = Number($("chunk").value);
-  const noResp = chr.properties.writeWithoutResponse;
-  for (const part of splitFrame(buf, size)) {
-    log("tx", "TX " + hex(part));
-    if (noResp) await chr.writeValueWithoutResponse(part);
-    else await chr.writeValueWithResponse(part);
-  }
+// All writes go through one lock so a whole message is never interleaved with another.
+function writeAll(buf) {
+  const run = async () => {
+    const size = Number($("chunk").value);
+    const noResp = chr.properties.writeWithoutResponse;
+    for (const part of splitFrame(buf, size)) {
+      if (!quiet) log("tx", "TX " + hex(part));
+      if (noResp) await chr.writeValueWithoutResponse(part);
+      else await chr.writeValueWithResponse(part);
+    }
+  };
+  const p = writeLock.then(run, run);
+  writeLock = p.catch(() => {});
+  return p;
 }
 
-// Send one control command and wait for its response (serialised).
-function request(cmd, data, respCmd, timeout = 3000) {
+// Send one message and wait for its response (serialised across the app).
+function sendMsg(buf, cate, respCmd, timeout = 3000) {
   const run = async () => {
     if (!chr) throw new Error("尚未連線");
-    const waiter = new Promise((resolve, reject) => {
-      if (respCmd == null) return resolve(null);
-      const p = { cate: CATE.CONTROL, cmd: respCmd, resolve, reject };
-      p.timer = setTimeout(() => {
-        const i = pending.indexOf(p); if (i >= 0) pending.splice(i, 1);
-        reject(new Error(`等待回應逾時（cmd ${respCmd}）`));
+    let entry = null;
+    const waiter = respCmd == null
+      ? Promise.resolve(null)
+      : new Promise((resolve, reject) => { entry = { cate, cmd: respCmd, resolve, reject }; pending.push(entry); });
+    try { await writeAll(buf); }
+    catch (e) { const i = pending.indexOf(entry); if (i >= 0) pending.splice(i, 1); throw e; }
+    if (entry && pending.includes(entry)) {
+      entry.timer = setTimeout(() => {
+        const i = pending.indexOf(entry); if (i >= 0) pending.splice(i, 1);
+        entry.reject(new Error(`等待回應逾時（cate ${cate} cmd ${respCmd}）`));
       }, timeout);
-      pending.push(p);
-    });
-    await writeAll(controlFrame(cmd, data));
+    }
     return waiter;
   };
   const p = busy.then(run, run);
   busy = p.catch(() => {});
   return p;
 }
+const request = (cmd, data, respCmd, timeout) => sendMsg(controlFrame(cmd, data), CATE.CONTROL, respCmd, timeout);
+const sendFile = (cmd, data, respCmd, timeout) => sendMsg(fileMsg(cmd, data), CATE.FILE, respCmd, timeout);
 
 const status = (msg) => (msg && msg.data.length >= 2 ? u16(msg.data, 0) : 0);
 function mustOk(msg, what) { const s = status(msg); if (s !== 0) throw new Error(`${what}失敗（狀態碼 ${s}）`); }
@@ -489,6 +703,233 @@ async function sendRaw() {
 }
 
 function updateCardBytes() { $("cardBytes").textContent = enc.encode(normNl($("cardText").value)).length; }
+
+/* ---- Media editor: image -> PNG, GIF / video -> MJPEG MP4 ---- */
+const OUT_W = 240, OUT_H = 320, FPS = 20, MAX_CLIP_MS = 10000;
+const ED = { src: null, cur: null, scale: 1, offX: 0, offY: 0, startMs: 0, lenMs: 5000, out: null, run: 0, token: 0 };
+const stage = $("stage"), sctx = stage.getContext("2d");
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const edMode = () => document.querySelector('input[name="mediaMode"]:checked').value;
+const setMsg = (t, pct) => { $("mMsg").textContent = t; if (pct != null) $("mProg").value = pct; };
+const fmtMs = (ms) => (ms / 1000).toFixed(1) + "s";
+
+function layout() {
+  const s = ED.src, base = Math.max(OUT_W / s.w, OUT_H / s.h), k = base * ED.scale;
+  const dw = s.w * k, dh = s.h * k;
+  const mx = Math.max(0, (dw - OUT_W) / 2), my = Math.max(0, (dh - OUT_H) / 2);
+  ED.offX = clamp(ED.offX, -mx, mx); ED.offY = clamp(ED.offY, -my, my);
+  return { dx: (OUT_W - dw) / 2 + ED.offX, dy: (OUT_H - dh) / 2 + ED.offY, dw, dh };
+}
+function paint(ctx, img) {
+  const L = layout();
+  ctx.clearRect(0, 0, OUT_W, OUT_H);
+  ctx.drawImage(img, L.dx, L.dy, L.dw, L.dh);
+}
+const redraw = () => { if (ED.src && ED.cur) paint(sctx, ED.cur); };
+function refreshSendBtn() { $("btnSend").disabled = !(ED.out && chr); $("btnDl").disabled = !ED.out; }
+function invalidate() { ED.out = null; $("mOut").textContent = ""; refreshSendBtn(); }
+
+function seekVideo(v, sec) {
+  return new Promise((resolve) => {
+    const target = Math.min(sec, Math.max(0, v.duration - 0.001));
+    if (Math.abs(v.currentTime - target) < 0.0005) return resolve();
+    const done = () => { v.removeEventListener("seeked", done); clearTimeout(t); resolve(); };
+    const t = setTimeout(done, 4000);
+    v.addEventListener("seeked", done);
+    v.currentTime = target;
+  });
+}
+async function grabFrame(ms) {
+  const s = ED.src;
+  if (s.kind === "image") return { img: s.bmp, close() {} };
+  if (s.kind === "video") { await seekVideo(s.video, ms / 1000); return { img: s.video, close() {} }; }
+  let i = 0;
+  while (i + 1 < s.count && s.starts[i + 1] <= ms) i++;
+  const { image } = await s.decoder.decode({ frameIndex: i });
+  return { img: image, close() { image.close(); } };
+}
+async function showAt(ms) {
+  const f = await grabFrame(ms);
+  try {
+    if (ED.src.kind === "gif") { if (ED.cur) ED.cur.close(); ED.cur = await createImageBitmap(f.img); }
+    else ED.cur = f.img;
+  } finally { f.close(); }
+  redraw();
+}
+function closeSrc() {
+  const s = ED.src;
+  if (!s) return;
+  try {
+    if (s.kind === "image") s.bmp.close();
+    if (s.kind === "gif") { if (ED.cur) ED.cur.close(); s.decoder.close(); }
+    if (s.kind === "video") URL.revokeObjectURL(s.url);
+  } catch (_) {}
+  ED.src = null; ED.cur = null;
+  sctx.clearRect(0, 0, OUT_W, OUT_H);
+}
+function stopPreview() { ED.run = 0; ED.token++; $("btnPlay").textContent = "播放預覽"; }
+
+function syncAnimSliders() {
+  const s = ED.src, dur = (s && s.duration) || 0;
+  const maxLen = Math.min(MAX_CLIP_MS, Math.max(100, dur - ED.startMs));
+  ED.lenMs = clamp(ED.lenMs, Math.min(500, maxLen), maxLen);
+  $("startRange").max = Math.max(0, Math.floor(dur - 500));
+  $("startRange").value = ED.startMs;
+  $("lenRange").min = Math.min(500, maxLen);
+  $("lenRange").max = maxLen;
+  $("lenRange").value = ED.lenMs;
+  $("startLbl").textContent = fmtMs(ED.startMs);
+  $("lenLbl").textContent = fmtMs(ED.lenMs);
+}
+function setScale(v) {
+  ED.scale = clamp(v, 1, 4);
+  $("zoom").value = Math.round(ED.scale * 100);
+  $("zoomLbl").textContent = Math.round(ED.scale * 100) + "%";
+  invalidate(); redraw();
+}
+
+async function loadMedia(file) {
+  stopPreview(); closeSrc(); invalidate();
+  if (!file) return;
+  setMsg("讀取中…", 0);
+  try {
+    if (edMode() === "image") {
+      const bmp = await createImageBitmap(file);
+      ED.src = { kind: "image", w: bmp.width, h: bmp.height, bmp, duration: 0 };
+    } else if (/gif$/i.test(file.type) || /\.gif$/i.test(file.name)) {
+      if (typeof ImageDecoder === "undefined") throw new Error("此瀏覽器不支援 GIF 解碼，請使用 Chrome / Edge 94 以上，或改用影片");
+      const decoder = new ImageDecoder({ data: await file.arrayBuffer(), type: "image/gif" });
+      await decoder.tracks.ready;
+      const count = decoder.tracks.selectedTrack.frameCount;
+      const starts = []; let t = 0, w = 0, h = 0;
+      for (let i = 0; i < count; i++) {
+        const { image } = await decoder.decode({ frameIndex: i });
+        starts.push(t);
+        t += Math.max(20, (image.duration || 100000) / 1000);
+        w = image.displayWidth; h = image.displayHeight; image.close();
+      }
+      ED.src = { kind: "gif", w, h, decoder, starts, count, duration: t };
+    } else {
+      const v = document.createElement("video");
+      v.muted = true; v.playsInline = true; v.preload = "auto";
+      const url = URL.createObjectURL(file);
+      await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej(new Error("無法讀取影片（格式不支援？）")); v.src = url; });
+      ED.src = { kind: "video", w: v.videoWidth, h: v.videoHeight, video: v, url, duration: v.duration * 1000 };
+    }
+  } catch (e) { closeSrc(); setMsg("讀取失敗：" + e.message, 0); return; }
+  ED.scale = 1; ED.offX = 0; ED.offY = 0; ED.startMs = 0; ED.lenMs = MAX_CLIP_MS;
+  $("zoom").value = 100; $("zoomLbl").textContent = "100%";
+  $("animCtrls").hidden = ED.src.kind === "image";
+  if (ED.src.kind !== "image") syncAnimSliders();
+  await showAt(0);
+  const info = ED.src.kind === "image" ? "" : `，長度 ${fmtMs(ED.src.duration)}`;
+  setMsg(`已載入 ${ED.src.w}×${ED.src.h}${info}。拖曳畫面調整構圖，再按「轉換」。`, 0);
+}
+
+async function convert() {
+  if (!ED.src) { setMsg("請先選擇檔案", 0); return; }
+  stopPreview(); invalidate();
+  const off = document.createElement("canvas");
+  off.width = OUT_W; off.height = OUT_H;
+  const octx = off.getContext("2d");
+  const stamp = String(Date.now()).slice(-6);
+  const toBlob = (type, q) => new Promise((res, rej) => off.toBlob((b) => (b ? res(b) : rej(new Error("編碼失敗"))), type, q));
+  try {
+    if (edMode() === "image") {
+      paint(octx, ED.src.bmp);
+      const bytes = new Uint8Array(await (await toBlob("image/png")).arrayBuffer());
+      setOut(bytes, `c${stamp}.png`, "image/png", "");
+    } else {
+      const n = Math.max(1, Math.round((ED.lenMs * FPS) / 1000));
+      const q = clamp((31 - Number($("qval").value)) / 30, 0.1, 1);
+      const frames = [];
+      for (let i = 0; i < n; i++) {
+        const f = await grabFrame(ED.startMs + (i * 1000) / FPS);
+        try { paint(octx, f.img); } finally { f.close(); }
+        frames.push(new Uint8Array(await (await toBlob("image/jpeg", q)).arrayBuffer()));
+        setMsg(`轉換中 ${i + 1}/${n}`, Math.round(((i + 1) / n) * 100));
+      }
+      setOut(buildMjpegMp4(frames, { frameRate: FPS, width: OUT_W, height: OUT_H }), `v${stamp}.mp4`, "video/mp4", `，${n} 幀 @ ${FPS}fps`);
+    }
+  } catch (e) { setMsg("轉換失敗：" + e.message, 0); log("err", "轉換失敗：" + e.message); }
+}
+function setOut(bytes, name, mime, extra) {
+  ED.out = { bytes, name, mime };
+  const kb = bytes.length / 1024;
+  $("mOut").textContent = `輸出：${name} · ${kb >= 1024 ? (kb / 1024).toFixed(2) + " MB" : kb.toFixed(1) + " KB"}${extra}`;
+  setMsg("轉換完成。可下載檢查，或傳送到裝置。", 0);
+  refreshSendBtn();
+}
+async function sendOut() {
+  if (!ED.out) return;
+  if (!chr) { setMsg("請先連線裝置", 0); return; }
+  quiet = true; $("btnSend").disabled = true; $("btnConvert").disabled = true;
+  try {
+    log("inf", `開始傳輸 ${ED.out.name}（${ED.out.bytes.length} bytes）…`);
+    const t0 = Date.now();
+    const r = await transferFile(ED.out.bytes, ED.out.name, FILE_TYPE_RESOURCE, (p, m) => setMsg(m, p));
+    setMsg(`已傳輸到裝置 ✓（${((Date.now() - t0) / 1000).toFixed(1)} 秒）`, 100);
+    log("inf", `傳輸完成：${r.name}，${r.packets} 包，CRC 0x${r.crc.toString(16)}`);
+  } catch (e) {
+    setMsg("傳輸失敗：" + e.message, 0);
+    log("err", "傳輸失敗：" + e.message);
+  } finally { quiet = false; $("btnConvert").disabled = false; refreshSendBtn(); }
+}
+function downloadOut() {
+  if (!ED.out) return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([ED.out.bytes], { type: ED.out.mime }));
+  a.download = ED.out.name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+async function togglePreview() {
+  if (ED.run) { stopPreview(); return; }
+  if (!ED.src || ED.src.kind === "image") return;
+  const token = ++ED.token; ED.run = token;
+  $("btnPlay").textContent = "停止預覽";
+  while (ED.run === token) {
+    for (let t = ED.startMs; t < ED.startMs + ED.lenMs && ED.run === token; t += 1000 / FPS) {
+      const t0 = performance.now();
+      await showAt(t);
+      await sleep(Math.max(0, 1000 / FPS - (performance.now() - t0)));
+    }
+  }
+}
+
+let drag = null;
+stage.addEventListener("pointerdown", (e) => {
+  if (!ED.src) return;
+  drag = { x: e.clientX, y: e.clientY, ox: ED.offX, oy: ED.offY };
+  stage.setPointerCapture(e.pointerId);
+});
+stage.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  const k = OUT_W / stage.getBoundingClientRect().width;
+  ED.offX = drag.ox + (e.clientX - drag.x) * k;
+  ED.offY = drag.oy + (e.clientY - drag.y) * k;
+  invalidate(); redraw();
+});
+["pointerup", "pointercancel"].forEach((t) => stage.addEventListener(t, () => { drag = null; }));
+stage.addEventListener("wheel", (e) => { if (!ED.src) return; e.preventDefault(); setScale(ED.scale * (e.deltaY < 0 ? 1.08 : 1 / 1.08)); }, { passive: false });
+$("zoom").addEventListener("input", () => setScale(Number($("zoom").value) / 100));
+$("btnReset").onclick = () => { ED.offX = 0; ED.offY = 0; setScale(1); };
+$("startRange").addEventListener("input", () => {
+  ED.startMs = Number($("startRange").value); syncAnimSliders(); invalidate(); stopPreview(); showAt(ED.startMs);
+});
+$("lenRange").addEventListener("input", () => { ED.lenMs = Number($("lenRange").value); syncAnimSliders(); invalidate(); });
+$("mediaFile").addEventListener("change", () => loadMedia($("mediaFile").files[0]));
+document.querySelectorAll('input[name="mediaMode"]').forEach((r) => r.addEventListener("change", () => {
+  $("mediaFile").accept = edMode() === "image" ? "image/*" : "image/gif,video/*";
+  $("mediaFile").value = "";
+  stopPreview(); closeSrc(); invalidate();
+  $("animCtrls").hidden = true;
+  setMsg("請選擇檔案。", 0);
+}));
+$("btnConvert").onclick = () => convert();
+$("btnSend").onclick = () => sendOut();
+$("btnDl").onclick = () => downloadOut();
+$("btnPlay").onclick = () => togglePreview();
 
 /* ---- Wire up ---- */
 if (!navigator.bluetooth) $("unsupported").hidden = false;
